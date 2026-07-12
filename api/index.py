@@ -1,82 +1,97 @@
 import os
-from flask import Flask, request, jsonify
-from telegram import Update, Bot
-import google.generativeai as genai
 import requests
-import asyncio
+from flask import Flask, request, jsonify
+import google.generativeai as genai
 
 app = Flask(__name__)
 
-# Mengambil token aman dari Environment Variables Vercel
+# Ambil token dari Environment Variables Vercel
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-# Inisialisasi Bot Telegram dan Google Gemini
-bot = Bot(token=TELEGRAM_TOKEN)
+# Konfigurasi Google Gemini
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel('gemini-2.5-flash')
+model = genai.GenerativeModel('gemini-1.5-flash')
 
-async def process_telegram_update(update_dict):
-    """Fungsi utama untuk memproses kiriman pesan dari Telegram"""
-    update = Update.de_json(update_dict, bot)
-    
-    # Pastikan ada pesan masuk dan pesan tersebut berupa Voice Note (Pesan Suara)
-    if update.message and update.message.voice:
-        chat_id = update.message.chat_id
-        
-        # Kirim status loading agar pengguna tahu bot sedang bekerja
-        status_msg = await bot.send_message(chat_id=chat_id, text="🎙️ Sedang mengunduh suara dan memproses transkripsi...")
-        
-        try:
-            # 1. Ambil informasi file dari Telegram
-            voice_file = await update.message.voice.get_file()
-            file_url = voice_file.file_path
-            
-            # 2. Unduh file suara langsung ke folder memori sementara /tmp (Vercel bersifat read-only)
-            local_filename = f"/tmp/{voice_file.file_id}.ogg"
-            response_audio = requests.get(file_url)
-            with open(local_filename, 'wb') as f:
-                f.write(response_audio.content)
-            
-            # 3. Unggah file audio ogg tersebut ke server API Gemini dengan menentukan jenis file (Mime Type)
-            uploaded_file = genai.upload_file(path=local_filename, mime_type="audio/ogg")
-            
-            # 4. Prompt pintar untuk mendeteksi Bahasa Sunda atau Bahasa Indonesia otomatis
-            prompt = (
-                "Dengarkan rekaman audio ini dengan sangat teliti, lalu analisis bahasanya.\n"
-                "Berikan output dengan format rapi seperti di bawah ini:\n\n"
-                
-                "🗣️ **Transkripsi Asli:**\n"
-                "[Tuliskan teks kata-per-kata yang diucapkan secara akurat sesuai bahasa aslinya beserta tanda baca yang rapi]\n\n"
-                
-                "ℹ️ **Deteksi Bahasa:**\n"
-                "[Sebutkan bahasa apa yang digunakan, contoh: 'Bahasa Sunda' atau 'Bahasa Indonesia']\n\n"
-                
-                "🇮🇩 **Arti / Terjemahan:**\n"
-                "[Jika audio menggunakan Bahasa Sunda, terjemahkan ke Bahasa Indonesia yang baik dan santun. "
-                "TETAPI jika audio dari awal sudah menggunakan Bahasa Indonesia, cukup tulis: 'Ucapan sudah dalam Bahasa Indonesia']"
-            )
-            
-            # 5. Jalankan proses AI menggunakan model gemini-2.5-flash
-            gemini_response = model.generate_content([uploaded_file, prompt])
-            
-            # 6. Kirim balik teks hasil akhir ke user, lalu hapus pesan loading tadi
-            await bot.send_message(chat_id=chat_id, text=gemini_response.text, parse_mode="Markdown")
-            await bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
-            
-            # Hapus file sampah audio di folder /tmp agar kapasitas penyimpanan tidak penuh
-            if os.path.exists(local_filename):
-                os.remove(local_filename)
-                
-        except Exception as e:
-            await bot.send_message(chat_id=chat_id, text=f"⚠️ Terjadi kesalahan teknis: {str(e)}")
+def send_telegram_message(chat_id, text, reply_to_message_id=None):
+    """Fungsi sederhana untuk mengirim pesan ke Telegram"""
+    url = f"https://telegram.org{TELEGRAM_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "Markdown"
+    }
+    if reply_to_message_id:
+        payload["reply_to_message_id"] = reply_to_message_id
+    requests.post(url, json=payload)
 
 @app.route('/', methods=['POST'])
 def webhook():
-    """Endpoint Webhook yang akan dipanggil secara otomatis oleh server Telegram"""
-    if request.method == "POST":
-        update_dict = request.get_json(force=True)
-        # Menjalankan fungsi async di dalam routing Flask sync menggunakan asyncio
-        asyncio.run(process_telegram_update(update_dict))
+    """Endpoint Webhook Utama untuk menerima pesan Telegram"""
+    try:
+        update = request.get_json(force=True)
+        
+        # Pastikan data berupa pesan teks atau media yang masuk
+        if "message" in update:
+            message = update["message"]
+            chat_id = message["chat"]["id"]
+            message_id = message["message_id"]
+            
+            # Cek apakah pengguna mengirimkan Voice Note (Pesan Suara)
+            if "voice" in message:
+                voice = message["voice"]
+                file_id = voice["file_id"]
+                
+                # 1. Dapatkan jalur file suara dari server Telegram
+                get_file_url = f"https://telegram.org{TELEGRAM_TOKEN}/getFile?file_id={file_id}"
+                file_info = requests.get(get_file_url).json()
+                
+                if file_info.get("ok"):
+                    file_path = file_info["result"]["file_path"]
+                    download_url = f"https://telegram.org{TELEGRAM_TOKEN}/{file_path}"
+                    
+                    # 2. Unduh file suara langsung ke RAM berupa bytes data
+                    audio_data = requests.get(download_url).content
+                    
+                    # 3. Prompt instruksi pintar untuk deteksi Sunda / Indonesia otomatis
+                    prompt = (
+                        "Dengarkan rekaman audio ini dengan sangat teliti, lalu analisis bahasanya.\n"
+                        "Berikan output dengan format rapi seperti di bawah ini:\n\n"
+                        
+                        "🗣️ **Transkripsi Asli:**\n"
+                        "[Tuliskan teks kata-per-kata yang diucapkan secara akurat sesuai bahasa aslinya beserta tanda baca yang rapi]\n\n"
+                        
+                        "ℹ️ **Deteksi Bahasa:**\n"
+                        "[Sebutkan bahasa apa yang digunakan, contoh: 'Bahasa Sunda' atau 'Bahasa Indonesia']\n\n"
+                        
+                        "🇮🇩 **Arti / Terjemahan:**\n"
+                        "[Jika audio menggunakan Bahasa Sunda, terjemahkan ke Bahasa Indonesia yang baik dan santun. "
+                        "TETAPI jika audio dari awal sudah menggunakan Bahasa Indonesia, cukup tulis: 'Ucapan sudah dalam Bahasa Indonesia']"
+                    )
+                    
+                    # 4. Kirim data suara langsung secara inline ke Gemini AI
+                    response = model.generate_content([
+                        {
+                            'mime_type': 'audio/ogg',
+                            'data': audio_data
+                        },
+                        prompt
+                    ])
+                    
+                    # 5. Kirimkan hasil akhir transkripsi ke user Telegram
+                    send_telegram_message(chat_id, response.text, reply_to_message_id=message_id)
+            
+            # Cek jika pengguna hanya mengirimkan teks biasa seperti /start
+            elif "text" in message and message["text"] == "/start":
+                welcome_text = "👋 Halo! Kirimkan pesan suara (*voice note*) dalam Bahasa Sunda atau Bahasa Indonesia ke sini, saya akan mentranskrip dan mengartikannya secara otomatis!"
+                send_telegram_message(chat_id, welcome_text)
+                
         return jsonify({"status": "success"}), 200
+        
+    except Exception as e:
+        # Jika terjadi eror internal, tetap kirim status 200 agar Telegram tidak melakukan loop kirim ulang
+        return jsonify({"status": "error", "message": str(e)}), 200
+
+@app.route('/health', methods=['GET'])
+def health():
     return "OK", 200
