@@ -1,7 +1,7 @@
 import os
 from flask import Flask, request, jsonify
 from telegram import Update, Bot
-from google import genai
+import google.generativeai as genai
 import requests
 import asyncio
 
@@ -11,15 +11,16 @@ app = Flask(__name__)
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-# Inisialisasi Bot Telegram dan Client Google GenAI SDK Baru
+# Inisialisasi Bot Telegram dan Google Gemini
 bot = Bot(token=TELEGRAM_TOKEN)
-client = genai.Client(api_key=GEMINI_API_KEY)
+genai.configure(api_key=GEMINI_API_KEY)
+model = genai.GenerativeModel('gemini-2.5-flash')
 
 async def process_telegram_update(update_dict):
     """Fungsi utama untuk memproses kiriman pesan dari Telegram"""
     update = Update.de_json(update_dict, bot)
     
-    # Pastikan ada pesan masuk dan pesan tersebut berupa Voice Note
+    # Pastikan ada pesan masuk dan pesan tersebut berupa Voice Note (Pesan Suara)
     if update.message and update.message.voice:
         chat_id = update.message.chat_id
         
@@ -37,8 +38,8 @@ async def process_telegram_update(update_dict):
             with open(local_filename, 'wb') as f:
                 f.write(response_audio.content)
             
-            # 3. Unggah file audio ogg tersebut ke server API Gemini
-            uploaded_file = client.files.upload(file=local_filename)
+            # 3. Unggah file audio ogg tersebut ke server API Gemini dengan menentukan jenis file (Mime Type)
+            uploaded_file = genai.upload_file(path=local_filename, mime_type="audio/ogg")
             
             # 4. Prompt pintar untuk mendeteksi Bahasa Sunda atau Bahasa Indonesia otomatis
             prompt = (
@@ -57,16 +58,13 @@ async def process_telegram_update(update_dict):
             )
             
             # 5. Jalankan proses AI menggunakan model gemini-2.5-flash
-            gemini_response = client.models.generate_content(
-                model='gemini-2.5-flash',
-                contents=[uploaded_file, prompt]
-            )
+            gemini_response = model.generate_content([uploaded_file, prompt])
             
             # 6. Kirim balik teks hasil akhir ke user, lalu hapus pesan loading tadi
             await bot.send_message(chat_id=chat_id, text=gemini_response.text, parse_mode="Markdown")
             await bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
             
-            # Hapus file sampah audio di folder /tmp agar kapasitas tidak penuh
+            # Hapus file sampah audio di folder /tmp agar kapasitas penyimpanan tidak penuh
             if os.path.exists(local_filename):
                 os.remove(local_filename)
                 
@@ -75,10 +73,10 @@ async def process_telegram_update(update_dict):
 
 @app.route('/', methods=['POST'])
 def webhook():
-    """Endpoint Webhook yang akan dipanggil oleh Telegram"""
+    """Endpoint Webhook yang akan dipanggil secara otomatis oleh server Telegram"""
     if request.method == "POST":
         update_dict = request.get_json(force=True)
-        # Menjalankan fungsi async di dalam routing Flask sync
+        # Menjalankan fungsi async di dalam routing Flask sync menggunakan asyncio
         asyncio.run(process_telegram_update(update_dict))
         return jsonify({"status": "success"}), 200
     return "OK", 200
