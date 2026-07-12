@@ -57,7 +57,11 @@ async def process_telegram_update(update_dict):
 
 
         uploaded_file = client.files.upload(
-            file=local_filename
+        file=local_filename,
+        config={
+        "mime_type": "audio/ogg"
+    }
+)
         )
 
 
