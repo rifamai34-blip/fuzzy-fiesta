@@ -1,7 +1,7 @@
 import os
 from flask import Flask, request, jsonify
 from telegram import Update, Bot
-import google.generativeai as genai
+from google import genai
 import requests
 import asyncio
 
@@ -11,10 +11,9 @@ app = Flask(__name__)
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-# Inisialisasi Bot Telegram dan Google Gemini
+# Inisialisasi Bot Telegram dan Client Google GenAI SDK Baru
 bot = Bot(token=TELEGRAM_TOKEN)
-genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel('gemini-2.5-flash')
+client = genai.Client(api_key=GEMINI_API_KEY)
 
 async def process_telegram_update(update_dict):
     """Fungsi utama untuk memproses kiriman pesan dari Telegram"""
@@ -39,7 +38,7 @@ async def process_telegram_update(update_dict):
                 f.write(response_audio.content)
             
             # 3. Unggah file audio ogg tersebut ke server API Gemini
-            uploaded_file = genai.upload_file(path=local_filename)
+            uploaded_file = client.files.upload(file=local_filename)
             
             # 4. Prompt pintar untuk mendeteksi Bahasa Sunda atau Bahasa Indonesia otomatis
             prompt = (
@@ -57,8 +56,11 @@ async def process_telegram_update(update_dict):
                 "TETAPI jika audio dari awal sudah menggunakan Bahasa Indonesia, cukup tulis: 'Ucapan sudah dalam Bahasa Indonesia']"
             )
             
-            # 5. Jalankan proses AI
-            gemini_response = model.generate_content([uploaded_file, prompt])
+            # 5. Jalankan proses AI menggunakan model gemini-2.5-flash
+            gemini_response = client.models.generate_content(
+                model='gemini-2.5-flash',
+                contents=[uploaded_file, prompt]
+            )
             
             # 6. Kirim balik teks hasil akhir ke user, lalu hapus pesan loading tadi
             await bot.send_message(chat_id=chat_id, text=gemini_response.text, parse_mode="Markdown")
@@ -80,25 +82,3 @@ def webhook():
         asyncio.run(process_telegram_update(update_dict))
         return jsonify({"status": "success"}), 200
     return "OK", 200
-# Struktur Handler wajib agar file Python dikenali sebagai Serverless Endpoint oleh Vercel
-class handler(BaseHTTPRequestHandler):
-    def do_POST(self):
-        """Menangkap data POST Webhook yang dikirim oleh server Telegram"""
-        content_length = int(self.headers['Content-Length'])
-        post_data = self.rfile.read(content_length)
-        
-        try:
-            update_dict = json.loads(post_data.decode('utf-8'))
-            
-            # Menjalankan fungsi async di dalam class sync menggunakan asyncio
-            import asyncio
-            asyncio.run(process_telegram_update(update_dict))
-            
-            # Beri respons status 200 OK ke Telegram agar Telegram tidak mengirim ulang data yang sama
-            self.send_response(200)
-            self.send_header('Content-type', 'application/json')
-            self.end_headers()
-            self.wfile.write(json.dumps({"status": "success"}).encode())
-        except Exception as e:
-            self.send_response(500)
-            self.end_headers()
