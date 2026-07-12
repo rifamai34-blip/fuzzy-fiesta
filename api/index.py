@@ -1,9 +1,11 @@
 import os
-import json
-import requests
-from http.server import BaseHTTPRequestHandler
+from flask import Flask, request, jsonify
 from telegram import Update, Bot
 import google.generativeai as genai
+import requests
+import asyncio
+
+app = Flask(__name__)
 
 # Mengambil token aman dari Environment Variables Vercel
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -18,7 +20,7 @@ async def process_telegram_update(update_dict):
     """Fungsi utama untuk memproses kiriman pesan dari Telegram"""
     update = Update.de_json(update_dict, bot)
     
-    # 1. Pastikan ada pesan masuk dan pesan tersebut berupa Voice Note
+    # Pastikan ada pesan masuk dan pesan tersebut berupa Voice Note
     if update.message and update.message.voice:
         chat_id = update.message.chat_id
         
@@ -26,32 +28,39 @@ async def process_telegram_update(update_dict):
         status_msg = await bot.send_message(chat_id=chat_id, text="🎙️ Sedang mengunduh suara dan memproses transkripsi...")
         
         try:
-            # 2. Ambil informasi file dari Telegram
+            # 1. Ambil informasi file dari Telegram
             voice_file = await update.message.voice.get_file()
             file_url = voice_file.file_path
             
-            # 3. Unduh file suara langsung ke folder memori sementara /tmp (Vercel bersifat read-only)
+            # 2. Unduh file suara langsung ke folder memori sementara /tmp (Vercel bersifat read-only)
             local_filename = f"/tmp/{voice_file.file_id}.ogg"
             response_audio = requests.get(file_url)
             with open(local_filename, 'wb') as f:
                 f.write(response_audio.content)
             
-            # 4. Unggah file audio ogg tersebut ke server API Gemini
+            # 3. Unggah file audio ogg tersebut ke server API Gemini
             uploaded_file = genai.upload_file(path=local_filename)
             
-            # 5. Prompt perintah spesifik Bahasa Sunda & Indonesia
+            # 4. Prompt pintar untuk mendeteksi Bahasa Sunda atau Bahasa Indonesia otomatis
             prompt = (
-                "Dengarkan rekaman audio ini dengan sangat teliti. Berikan output dengan format berikut:\n\n"
+                "Dengarkan rekaman audio ini dengan sangat teliti, lalu analisis bahasanya.\n"
+                "Berikan output dengan format rapi seperti di bawah ini:\n\n"
+                
                 "🗣️ **Transkripsi Asli:**\n"
-                "[Tuliskan teks kata-per-kata yang diucapkan secara akurat. Jika menggunakan Bahasa Sunda, tetap tulis dalam Bahasa Sunda beserta tanda bacanya]\n\n"
-                "🇮🇩 **Arti / Terjemahan (Bahasa Indonesia):**\n"
-                "[Terjemahkan seluruh ucapan tersebut ke dalam Bahasa Indonesia yang baik, santun, dan mudah dipahami]"
+                "[Tuliskan teks kata-per-kata yang diucapkan secara akurat sesuai bahasa aslinya beserta tanda baca yang rapi]\n\n"
+                
+                "ℹ️ **Deteksi Bahasa:**\n"
+                "[Sebutkan bahasa apa yang digunakan, contoh: 'Bahasa Sunda' atau 'Bahasa Indonesia']\n\n"
+                
+                "🇮🇩 **Arti / Terjemahan:**\n"
+                "[Jika audio menggunakan Bahasa Sunda, terjemahkan ke Bahasa Indonesia yang baik dan santun. "
+                "TETAPI jika audio dari awal sudah menggunakan Bahasa Indonesia, cukup tulis: 'Ucapan sudah dalam Bahasa Indonesia']"
             )
             
-            # 6. Jalankan proses AI
+            # 5. Jalankan proses AI
             gemini_response = model.generate_content([uploaded_file, prompt])
             
-            # 7. Kirim balik teks hasil akhir ke user, lalu hapus pesan loading tadi
+            # 6. Kirim balik teks hasil akhir ke user, lalu hapus pesan loading tadi
             await bot.send_message(chat_id=chat_id, text=gemini_response.text, parse_mode="Markdown")
             await bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
             
@@ -62,6 +71,15 @@ async def process_telegram_update(update_dict):
         except Exception as e:
             await bot.send_message(chat_id=chat_id, text=f"⚠️ Terjadi kesalahan teknis: {str(e)}")
 
+@app.route('/', methods=['POST'])
+def webhook():
+    """Endpoint Webhook yang akan dipanggil oleh Telegram"""
+    if request.method == "POST":
+        update_dict = request.get_json(force=True)
+        # Menjalankan fungsi async di dalam routing Flask sync
+        asyncio.run(process_telegram_update(update_dict))
+        return jsonify({"status": "success"}), 200
+    return "OK", 200
 # Struktur Handler wajib agar file Python dikenali sebagai Serverless Endpoint oleh Vercel
 class handler(BaseHTTPRequestHandler):
     def do_POST(self):
